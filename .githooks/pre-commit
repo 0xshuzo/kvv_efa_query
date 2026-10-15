@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Format every indexed C/C++ file without staging the user's unstaged edits."""
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".tpp", ".inl"}
+
+
+def run(arguments, data=None):
+    return subprocess.run(arguments, input=data, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, check=True).stdout
+
+
+def source_name(name):
+    # CMake's C/C++ templates follow the same rules as their generated headers.
+    candidate = name[:-3] if name.endswith(".in") else name
+    return candidate if Path(candidate).suffix.lower() in EXTENSIONS else None
+
+
+def main():
+    root = Path(os.fsdecode(run(["git", "rev-parse", "--show-toplevel"]).rstrip(b"\n")))
+    os.chdir(root)
+    entries = []
+    config_blob = None
+    for record in run(["git", "ls-files", "--stage", "-z"]).split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_name = record.split(b"\t", 1)
+        mode, blob, stage = metadata.split()
+        name = os.fsdecode(raw_name)
+        if name == ".clang-format" and stage == b"0":
+            config_blob = blob
+        assumed_name = source_name(name)
+        if assumed_name and mode in (b"100644", b"100755"):
+            if stage != b"0":
+                raise RuntimeError(f"Resolve the merge conflict in {name!r} before committing.")
+            entries.append((mode, blob, raw_name, assumed_name))
+    if not entries:
+        return
+
+    requested = os.environ.get("CLANG_FORMAT")
+    formatter = shutil.which(requested or "clang-format")
+    if not formatter:
+        raise RuntimeError("clang-format is required. Install it or set CLANG_FORMAT to its executable path.")
+
+    # Use the staged configuration even if its working copy has further edits.
+    config = (run(["git", "cat-file", "blob", config_blob.decode()]) if config_blob
+              else (root / ".clang-format").read_bytes())
+    changes = []
+    with tempfile.TemporaryDirectory(prefix="clang-format-") as temporary:
+        style = Path(temporary) / ".clang-format"
+        style.write_bytes(config)
+        for mode, blob, raw_name, assumed_name in entries:
+            original = run(["git", "cat-file", "blob", blob.decode()])
+            formatted = run([formatter, f"--style=file:{style}",
+                             f"--assume-filename={root / assumed_name}"], original)
+            if formatted != original:
+                changes.append((mode, raw_name, original, formatted))
+
+    if not changes:
+        return
+    # Finish all formatting before updating the index; a formatter error cannot
+    # leave just part of the commit reformatted. Git's GIT_INDEX_FILE is honored.
+    updates = bytearray()
+    for mode, raw_name, original, formatted in changes:
+        blob = run(["git", "hash-object", "-w", "--stdin"], formatted).strip()
+        updates.extend(mode + b" " + blob + b"\t" + raw_name + b"\0")
+    run(["git", "update-index", "-z", "--index-info"], bytes(updates))
+    for mode, raw_name, original, formatted in changes:
+        path = root / os.fsdecode(raw_name)
+        # Leave partially staged, deleted or replaced working files untouched.
+        if not path.is_symlink() and path.is_file() and path.read_bytes() == original:
+            path.write_bytes(formatted)
+        print(f"pre-commit: formatted {os.fsdecode(raw_name)!r}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        detail = (error.stderr.decode(errors="replace").strip() or str(error)) if isinstance(error, subprocess.CalledProcessError) else str(error)
+        print(f"pre-commit: {detail}", file=sys.stderr)
+        sys.exit(1)

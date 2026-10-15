@@ -1,0 +1,20 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+AccessModifierOffset: -4
+TabWidth: 4
+UseTab: Never
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+PointerAlignment: Left
+ColumnLimit: 100
+SortIncludes: false
+
+# Keep function bodies and control flow expanded for review.
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+InsertBraces: true
